@@ -1,0 +1,28 @@
+---
+description: GateKeeper engineering rules
+alwaysApply: true
+---
+
+# Product
+GateKeeper indexes a JS/TS repo into a dependency graph in Postgres (Neon), then diagnoses system failures from a vague bug report: ranked causes verified by probes in a git worktree, plus a suggested fix. It never edits user code.
+
+# Stack
+TypeScript strict ESM (NodeNext), Node 22, Express, Drizzle + node-postgres (pooled DATABASE_URL for requests, DATABASE_URL_DIRECT for migrations/COPY), tree-sitter, Vitest, Biome, pnpm. Dev on Windows; CI on Linux.
+
+# Architecture rules
+- src/core imports only zod, pino and Node built-ins.
+- Indexer rows are plain TS types (no zod on hot paths). Zod only for stage contracts (src/core/schemas.ts) and API input.
+- SQL lives only in *.repo.ts files. Pipeline and agents call repositories/ports, never SQL.
+- All node IDs come from src/core/ids.ts helpers. Repo paths are POSIX, repo-relative.
+- Tree traversal uses walk() from src/modules/indexing/parser.ts. No recursion over syntax trees. Avoid node.children in loops over whole trees.
+- Lines are 1-based via lines().
+- Syntax trees never leave the function that parses them; only facts do.
+- Structure comes from parsers. The LLM only selects from graph-produced lists.
+
+# Working rules
+- Implement only the ticket in front of you. Touch only the files it lists, plus their tests.
+- Before matching tree-sitter node types, print rootNode.toString() for the relevant snippet and match what is actually there.
+- Do not add dependencies unless the ticket names them.
+- Do not change existing test expectations. If one seems wrong, stop and explain.
+- Every new function gets tests. Run pnpm test and pnpm typecheck before reporting done.
+- Report at the end: files changed, tests added, test output summary, open questions.
