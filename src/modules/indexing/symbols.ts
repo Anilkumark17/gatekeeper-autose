@@ -12,6 +12,8 @@ export interface SymbolFact {
   qualifiedName: string;
   lineStart: number;
   lineEnd: number;
+  startIndex: number;
+  endIndex: number;
   exported: boolean;
   isDefault: boolean;
   bodyHash: string;
@@ -66,6 +68,8 @@ export function extractSymbols(root: Node, path: string): SymbolFact[] {
       qualifiedName,
       lineStart: start,
       lineEnd: end,
+      startIndex: node.startIndex,
+      endIndex: node.endIndex,
       exported,
       isDefault,
       bodyHash: hash(node.text),
