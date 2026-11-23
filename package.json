@@ -15,10 +15,12 @@
 		"test:watch": "vitest",
 		"db:generate": "drizzle-kit generate",
 		"db:migrate": "drizzle-kit migrate",
+		"db:migrate:test": "tsx scripts/migrate-test.ts",
 		"db:push": "drizzle-kit push",
 		"db:studio": "drizzle-kit studio",
 		"setup": "node --input-type=module -e \"import { copyFileSync, existsSync } from 'node:fs'; if (!existsSync('.env')) copyFileSync('.env.example', '.env');\"",
-		"doctor": "tsx scripts/doctor.ts"
+		"doctor": "tsx scripts/doctor.ts",
+		"bench:parse": "tsx scripts/bench-parse.ts"
 	},
 	"keywords": [],
 	"author": "",
