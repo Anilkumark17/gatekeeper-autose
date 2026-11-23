@@ -5,8 +5,9 @@ export type SkipReason =
   | "declaration"
   | "minified"
   | "not_source"
-  | "too_large"   // set by inspectHead (step 4)
-  | "generated";  // set by inspectHead (step 4)
+  | "too_large"
+  | "generated"
+  | "unreadable";
 
 const IGNORED_DIRS = new Set([
   "node_modules", "dist", "build", "out", ".next", ".nuxt", ".svelte-kit",
