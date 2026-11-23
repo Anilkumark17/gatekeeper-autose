@@ -1,6 +1,6 @@
 import type { SyntaxNode } from "tree-sitter";
-import type { SupportedLanguage } from "../../core/types.js";
-import { parseSource } from "./parser.js";
+import type { Lang } from "./lang.js";
+import { parseSource, walk } from "./parser.js";
 
 export type CodeSmell = {
 	type: string;
@@ -10,21 +10,14 @@ export type CodeSmell = {
 };
 
 export type SmellReport = {
-	language: SupportedLanguage;
+	language: Lang;
 	smells: CodeSmell[];
 	parseErrors: string[];
 };
 
 function collectSmells(root: SyntaxNode): CodeSmell[] {
 	const smells: CodeSmell[] = [];
-	const stack: SyntaxNode[] = [root];
-
-	while (stack.length > 0) {
-		const node = stack.pop();
-		if (!node) {
-			continue;
-		}
-
+	walk(root, (node) => {
 		if (node.type === "debugger_statement") {
 			smells.push({
 				type: "debugger_statement",
@@ -33,7 +26,6 @@ function collectSmells(root: SyntaxNode): CodeSmell[] {
 				column: node.startPosition.column + 1,
 			});
 		}
-
 		if (node.type === "empty_statement") {
 			smells.push({
 				type: "empty_statement",
@@ -42,28 +34,21 @@ function collectSmells(root: SyntaxNode): CodeSmell[] {
 				column: node.startPosition.column + 1,
 			});
 		}
-
-		for (let i = node.namedChildCount - 1; i >= 0; i--) {
-			const child = node.namedChild(i);
-			if (child) {
-				stack.push(child);
-			}
-		}
-	}
-
+		return true;
+	});
 	return smells;
 }
 
-export function detectSmells(source: string, language: SupportedLanguage): SmellReport {
+export function detectSmells(source: string, language: Lang): SmellReport {
 	const parseErrors: string[] = [];
 	let smells: CodeSmell[] = [];
 
 	try {
-		const tree = parseSource(source, language);
-		if (tree.rootNode.hasError) {
+		const parsed = parseSource(source, language);
+		if (parsed.hasError) {
 			parseErrors.push("Source contains syntax errors (partial AST).");
 		}
-		smells = collectSmells(tree.rootNode);
+		smells = collectSmells(parsed.tree.rootNode);
 	} catch (err) {
 		parseErrors.push(err instanceof Error ? err.message : "Failed to parse source.");
 	}
