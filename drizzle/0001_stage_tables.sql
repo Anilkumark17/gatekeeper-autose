@@ -1,0 +1,3 @@
+CREATE UNLOGGED TABLE IF NOT EXISTS "stage_nodes" (LIKE "nodes" INCLUDING DEFAULTS);
+--> statement-breakpoint
+CREATE UNLOGGED TABLE IF NOT EXISTS "stage_edges" (LIKE "edges" INCLUDING DEFAULTS);
