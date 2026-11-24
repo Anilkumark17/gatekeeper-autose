@@ -1,10 +1,17 @@
 import type Parser from "tree-sitter";
 import type { NodeId } from "../../core/ids.js";
 import { fileId } from "../../core/ids.js";
-import { lines, walk } from "./parser.js";
+import { walk } from "./parser.js";
+import type { RawImport } from "./imports.js";
+import { recordCallSiteImport } from "./imports.js";
 import type { SymbolFact } from "./symbols.js";
 
 type Node = Parser.SyntaxNode;
+
+/** tree-sitter may return distinct wrapper objects for the same span; never use `===` on SyntaxNode. */
+function sameNode(a: Node, b: Node): boolean {
+	return a.startIndex === b.startIndex && a.endIndex === b.endIndex && a.type === b.type;
+}
 
 const SKIP = new Set(["string", "template_string", "comment", "regex"]);
 
@@ -39,6 +46,7 @@ export interface RawCall {
 		kind: CalleeKind;
 		name: string | null;
 		chain: string | null;
+		optional?: boolean;
 	};
 	args: RawArg[];
 	line: number;
@@ -60,20 +68,37 @@ export interface RawRender {
 }
 
 const PASCAL = /^[A-Z]/;
-const stripWs = (s: string) => s.replace(/\s+/g, "");
 
-function enclosingFromId(symbols: SymbolFact[], index: number, moduleId: NodeId): NodeId {
-	let best: SymbolFact | null = null;
-	let bestSpan = Number.POSITIVE_INFINITY;
-	for (const s of symbols) {
-		if (s.startIndex > index || index >= s.endIndex) continue;
-		const span = s.endIndex - s.startIndex;
-		if (span < bestSpan) {
-			bestSpan = span;
-			best = s;
-		}
+function memberStepOptional(node: Node): boolean {
+	return node.namedChildren.some((c) => c.type === "optional_chain");
+}
+
+function memberChainMeta(node: Node): { chain: string; optional: boolean } {
+	if (node.type === "identifier") return { chain: node.text, optional: false };
+	if (node.type === "this") return { chain: "this", optional: false };
+	if (node.type === "super") return { chain: "super", optional: false };
+	if (node.type !== "member_expression") return { chain: "", optional: false };
+
+	const prop = node.childForFieldName("property");
+	const obj = node.childForFieldName("object");
+	const tail =
+		prop?.type === "property_identifier" || prop?.type === "identifier" ? prop.text : "";
+	const stepOptional = memberStepOptional(node);
+
+	if (!obj) return { chain: tail, optional: stepOptional };
+	if (obj.type === "this") return { chain: `this.${tail}`, optional: stepOptional };
+	if (obj.type === "super") return { chain: `super.${tail}`, optional: stepOptional };
+	if (obj.type === "identifier") return { chain: `${obj.text}.${tail}`, optional: stepOptional };
+	if (obj.type === "member_expression") {
+		const left = memberChainMeta(obj);
+		const chain = left.chain ? `${left.chain}.${tail}` : tail;
+		return { chain, optional: left.optional || stepOptional };
 	}
-	return best ? (best.id as NodeId) : moduleId;
+	return { chain: tail, optional: stepOptional };
+}
+
+function memberChain(node: Node): string {
+	return memberChainMeta(node).chain;
 }
 
 function rightmostProperty(member: Node): string | null {
@@ -86,16 +111,23 @@ function rightmostProperty(member: Node): string | null {
 	return null;
 }
 
-function parseMemberCallee(member: Node): { kind: CalleeKind; name: string | null; chain: string | null } {
-	const chain = stripWs(member.text);
+type ParsedCallee = RawCall["callee"];
+
+function parseMemberCallee(member: Node): ParsedCallee {
+	const { chain, optional } = memberChainMeta(member);
 	const name = rightmostProperty(member) ?? null;
 	const root = member.childForFieldName("object");
-	if (root?.type === "this") return { kind: "this", name, chain };
-	if (root?.type === "super") return { kind: "super", name, chain };
-	return { kind: "member", name, chain };
+	const base: ParsedCallee =
+		root?.type === "this"
+			? { kind: "this", name, chain }
+			: root?.type === "super"
+				? { kind: "super", name, chain }
+				: { kind: "member", name, chain };
+	if (optional) base.optional = true;
+	return base;
 }
 
-function parseCallee(fn: Node | null): { kind: CalleeKind; name: string | null; chain: string | null } {
+function parseCallee(fn: Node | null): ParsedCallee {
 	if (!fn) return { kind: "other", name: null, chain: null };
 	if (fn.type === "identifier") return { kind: "name", name: fn.text, chain: null };
 	if (fn.type === "member_expression") return parseMemberCallee(fn);
@@ -112,7 +144,7 @@ function isImportOrRequireCall(node: Node): boolean {
 function classifyArg(arg: Node, index: number): RawArg {
 	if (arg.type === "spread_element") return { index, kind: "spread", text: null };
 	if (arg.type === "identifier") return { index, kind: "identifier", text: arg.text };
-	if (arg.type === "member_expression") return { index, kind: "member", text: stripWs(arg.text) };
+	if (arg.type === "member_expression") return { index, kind: "member", text: memberChain(arg) };
 	if (FN_NODES.has(arg.type)) return { index, kind: "function", text: null };
 	if (LITERALS.has(arg.type)) {
 		const text = arg.text.length <= 80 ? arg.text : null;
@@ -127,11 +159,27 @@ function parseArgs(call: Node): RawArg[] {
 	return argsNode.namedChildren.map((arg, i) => classifyArg(arg, i));
 }
 
+function calleeAt(fn: Node | null): Node | null {
+	if (!fn) return null;
+	if (fn.type === "identifier") return fn;
+	if (fn.type === "member_expression") {
+		const prop = fn.childForFieldName("property");
+		if (prop?.type === "identifier" || prop?.type === "property_identifier") return prop;
+	}
+	return null;
+}
+
 function isCalleeIdentifier(node: Node): boolean {
 	const parent = node.parent;
 	if (!parent) return false;
-	if (parent.type === "call_expression" && parent.childForFieldName("function") === node) return true;
-	if (parent.type === "new_expression" && parent.childForFieldName("constructor") === node) return true;
+	if (parent.type === "call_expression") {
+		const fn = calleeAt(parent.childForFieldName("function"));
+		if (fn && sameNode(fn, node)) return true;
+	}
+	if (parent.type === "new_expression") {
+		const ctor = calleeAt(parent.childForFieldName("constructor"));
+		if (ctor && sameNode(ctor, node)) return true;
+	}
 	return false;
 }
 
@@ -139,23 +187,32 @@ function isDeclarationBinding(node: Node): boolean {
 	const parent = node.parent;
 	if (!parent) return false;
 
-	if (parent.type === "variable_declarator" && parent.childForFieldName("name") === node) return true;
-	if (parent.type === "import_specifier" && parent.childForFieldName("name") === node) return true;
-	if (parent.type === "function_declaration" && parent.childForFieldName("name") === node) return true;
-	if (parent.type === "class_declaration" && parent.childForFieldName("name") === node) return true;
+	const fieldIs = (field: string) => {
+		const child = parent.childForFieldName(field);
+		return child !== null && sameNode(child, node);
+	};
+	if (parent.type === "variable_declarator" && fieldIs("name")) return true;
+	if (parent.type === "import_specifier" && fieldIs("name")) return true;
+	if (parent.type === "function_declaration" && fieldIs("name")) return true;
+	if (parent.type === "export_statement") {
+		const decl = parent.childForFieldName("declaration");
+		const name = decl?.childForFieldName("name") ?? null;
+		if (name !== null && sameNode(name, node)) return true;
+	}
+	if (parent.type === "class_declaration" && fieldIs("name")) return true;
 	if (parent.type === "method_definition") {
 		const n = parent.childForFieldName("name") ?? parent.childForFieldName("property");
-		if (n === node) return true;
+		if (n !== null && sameNode(n, node)) return true;
 	}
 	if (parent.type === "field_definition" || parent.type === "public_field_definition") {
 		const n = parent.childForFieldName("property") ?? parent.childForFieldName("name");
-		if (n === node) return true;
+		if (n !== null && sameNode(n, node)) return true;
 	}
-	if (parent.type === "member_expression" && parent.childForFieldName("property") === node) return true;
-	if (parent.type === "pair" && parent.childForFieldName("key") === node) return true;
+	if (parent.type === "member_expression" && fieldIs("property")) return true;
+	if (parent.type === "pair" && fieldIs("key")) return true;
 	if (parent.type === "jsx_attribute") {
 		const name = parent.namedChildren[0];
-		if (name === node) return true;
+		if (name != null && sameNode(name, node)) return true;
 	}
 	return false;
 }
@@ -163,7 +220,7 @@ function isDeclarationBinding(node: Node): boolean {
 function refRole(node: Node): "argument" | "value" {
 	const parent = node.parent;
 	if (parent?.type === "arguments" && parent.parent?.type === "call_expression") {
-		if (parent.namedChildren.includes(node)) return "argument";
+		if (parent.namedChildren.some((c) => sameNode(c, node))) return "argument";
 	}
 	return "value";
 }
@@ -174,7 +231,7 @@ function jsxComponentName(nameNode: Node | null): string | null {
 		return PASCAL.test(nameNode.text) ? nameNode.text : null;
 	}
 	if (nameNode.type === "member_expression") {
-		return stripWs(nameNode.text);
+		return memberChain(nameNode);
 	}
 	return null;
 }
@@ -194,72 +251,349 @@ function jsxProps(el: Node): string[] {
 	return props;
 }
 
+/** Innermost symbol by byte span; tie-break on id for stability. */
+export function enclosingFromId(symbols: SymbolFact[], index: number, moduleId: NodeId): NodeId {
+	let best: SymbolFact | null = null;
+	let bestSpan = Number.POSITIVE_INFINITY;
+	for (const s of symbols) {
+		if (s.startIndex > index || index >= s.endIndex) continue;
+		const span = s.endIndex - s.startIndex;
+		if (span > bestSpan) continue;
+		if (span < bestSpan || best === null || s.id < best.id) {
+			bestSpan = span;
+			best = s;
+		}
+	}
+	return best ? (best.id as NodeId) : moduleId;
+}
+
+const ENCLOSING_BUCKET_SHIFT = 12;
+
+export function makeEnclosingFromId(symbols: SymbolFact[], moduleId: NodeId): (index: number) => NodeId {
+	if (symbols.length === 0) return () => moduleId;
+	const buckets = new Map<number, SymbolFact[]>();
+	for (const s of symbols) {
+		const b0 = s.startIndex >> ENCLOSING_BUCKET_SHIFT;
+		const endByte = Math.max(s.endIndex - 1, s.startIndex);
+		const b1 = endByte >> ENCLOSING_BUCKET_SHIFT;
+		for (let b = b0; b <= b1; b++) {
+			let list = buckets.get(b);
+			if (!list) {
+				list = [];
+				buckets.set(b, list);
+			}
+			list.push(s);
+		}
+	}
+
+	return (index: number): NodeId => {
+		const b = index >> ENCLOSING_BUCKET_SHIFT;
+		let best: SymbolFact | null = null;
+		let bestSpan = Number.POSITIVE_INFINITY;
+		const seen = new Set<string>();
+		for (const bb of [b - 1, b, b + 1]) {
+			const list = buckets.get(bb);
+			if (!list) continue;
+			for (const s of list) {
+				if (seen.has(s.id)) continue;
+				seen.add(s.id);
+				if (s.startIndex > index || index >= s.endIndex) continue;
+				const span = s.endIndex - s.startIndex;
+				if (span > bestSpan) continue;
+				if (span < bestSpan || best === null || s.id < best.id) {
+					bestSpan = span;
+					best = s;
+				}
+			}
+		}
+		return best ? (best.id as NodeId) : moduleId;
+	};
+}
+
+type AncestorFrame = { parentType: string; field: string };
+
+/** parentType:field keys that bind a name (skip ref extraction). */
+const DECL_BINDING_FIELD = new Set([
+	"import_specifier:name",
+	"variable_declarator:name",
+	"function_declaration:name",
+	"class_declaration:name",
+	"method_definition:name",
+	"method_definition:property",
+	"field_definition:property",
+	"field_definition:name",
+	"public_field_definition:property",
+	"public_field_definition:name",
+	"member_expression:property",
+	"pair:key",
+	"jsx_attribute:name",
+]);
+
+/** Test hook: full-tree walks from extractUsages. */
+export let usageFullWalkCount = 0;
+export function resetUsageFullWalkCount(): void {
+	usageFullWalkCount = 0;
+}
+
+function isCalleeByFrames(frames: readonly AncestorFrame[], nodeType: string): boolean {
+	const depth = frames.length;
+	if (depth === 0) return false;
+	const leaf = frames[depth - 1]!;
+	const isName = nodeType === "identifier" || nodeType === "property_identifier";
+	if (!isName) return false;
+	if (leaf.parentType === "call_expression" && leaf.field === "function") return true;
+	if (leaf.parentType === "new_expression" && leaf.field === "constructor") return true;
+	if (leaf.parentType === "member_expression" && leaf.field === "property") {
+		for (let i = depth - 2; i >= 0; i--) {
+			const f = frames[i]!;
+			if (f.parentType === "call_expression" && f.field === "function") return true;
+			if (f.parentType === "new_expression" && f.field === "constructor") return true;
+			if (f.parentType !== "member_expression" || f.field !== "object") break;
+		}
+	}
+	return false;
+}
+
+function isDeclBindingByFrames(frames: readonly AncestorFrame[], nodeType: string): boolean {
+	if (nodeType !== "identifier" && nodeType !== "property_identifier") return false;
+	const f = frames[frames.length - 1];
+	if (!f) return false;
+	if (f.parentType === "variable_declarator" && f.field === "name") return true;
+	if (f.parentType === "import_specifier" && f.field === "name") return true;
+	if (f.parentType === "function_declaration" && f.field === "name") return true;
+	if (f.parentType === "class_declaration" && f.field === "name") return true;
+	if (f.parentType === "method_definition" && (f.field === "name" || f.field === "property")) return true;
+	if ((f.parentType === "field_definition" || f.parentType === "public_field_definition") &&
+		(f.field === "property" || f.field === "name")
+	) {
+		return true;
+	}
+	if (f.parentType === "member_expression" && f.field === "property") return true;
+	if (f.parentType === "pair" && f.field === "key") return true;
+	if (f.parentType === "jsx_attribute" && f.field === "name") return true;
+	const g = frames[frames.length - 2];
+	if (g?.parentType === "export_statement" && g.field === "declaration") {
+		if (f.parentType === "function_declaration" && f.field === "name") return true;
+		if (f.parentType === "class_declaration" && f.field === "name") return true;
+	}
+	return false;
+}
+
+function refRoleByFrames(frames: readonly AncestorFrame[]): "argument" | "value" {
+	const f = frames[frames.length - 1];
+	if (!f || f.parentType !== "arguments") return "value";
+	const g = frames[frames.length - 2];
+	return g?.parentType === "call_expression" ? "argument" : "value";
+}
+
+type WalkCtx = {
+	readonly nodeType: string;
+	readonly startIndex: number;
+	readonly endIndex: number;
+	readonly line: number;
+	readonly text: string;
+	readonly frames: readonly AncestorFrame[];
+	materialize: () => Node;
+};
+
+function walkWithFields(root: Node, visit: (ctx: WalkCtx) => boolean): void {
+	usageFullWalkCount++;
+	const cursor = root.walk();
+	const frames: AncestorFrame[] = [];
+
+	while (true) {
+		const isNamed = cursor.nodeIsNamed;
+		let descend = true;
+
+		let parentType = "";
+		if (isNamed) {
+			parentType = cursor.nodeType;
+			const startIndex = cursor.startIndex;
+			const endIndex = cursor.endIndex;
+			const line = cursor.startPosition.row + 1;
+			const text =
+				parentType === "identifier" || parentType === "property_identifier" ? cursor.nodeText : "";
+
+			descend = visit({
+				nodeType: parentType,
+				startIndex,
+				endIndex,
+				line,
+				text,
+				frames,
+				materialize: () => cursor.currentNode as Node,
+			});
+		}
+
+		if (descend && cursor.gotoFirstChild()) {
+			if (parentType) frames.push({ parentType, field: cursor.currentFieldName ?? "" });
+			continue;
+		}
+		if (cursor.gotoNextSibling()) {
+			const top = frames.at(-1);
+			if (top) top.field = cursor.currentFieldName ?? "";
+			continue;
+		}
+		do {
+			if (frames.length > 0) frames.pop();
+			if (!cursor.gotoParent()) return;
+		} while (!cursor.gotoNextSibling());
+		const top = frames.at(-1);
+		if (top) top.field = cursor.currentFieldName ?? "";
+	}
+}
+
+function cmpString(a: string, b: string): number {
+	return a < b ? -1 : a > b ? 1 : 0;
+}
+
+type SiteCall = RawCall & { startIndex: number };
+type SiteRender = RawRender & { startIndex: number };
+
+function sortCalls(calls: SiteCall[]): RawCall[] {
+	return [...calls]
+		.sort(
+			(a, b) =>
+				cmpString(a.fromId, b.fromId) ||
+				a.line - b.line ||
+				a.startIndex - b.startIndex,
+		)
+		.map(({ startIndex: _i, ...rest }) => rest);
+}
+
+function sortRenders(renders: SiteRender[]): RawRender[] {
+	return [...renders]
+		.sort(
+			(a, b) =>
+				cmpString(a.fromId, b.fromId) ||
+				a.line - b.line ||
+				a.startIndex - b.startIndex,
+		)
+		.map(({ startIndex: _i, ...rest }) => rest);
+}
+
+function finalizeRefs(raw: Array<RawRef & { startIndex: number }>): RawRef[] {
+	const byKey = new Map<string, RawRef & { startIndex: number }>();
+	for (const r of raw) {
+		const key = `${r.fromId}|${r.name}|${r.role}`;
+		const prev = byKey.get(key);
+		if (!prev || r.line < prev.line || (r.line === prev.line && r.startIndex < prev.startIndex)) {
+			byKey.set(key, r);
+		}
+	}
+	return [...byKey.values()]
+		.sort(
+			(a, b) =>
+				cmpString(a.fromId, b.fromId) ||
+				a.line - b.line ||
+				cmpString(a.name, b.name) ||
+				cmpString(a.role, b.role),
+		)
+		.map(({ startIndex: _i, ...rest }) => rest);
+}
+
 export function extractUsages(
 	root: Node,
 	symbols: SymbolFact[],
 	knownNames: Set<string>,
 	filePath: string,
-): { calls: RawCall[]; refs: RawRef[]; renders: RawRender[] } {
+): { calls: RawCall[]; refs: RawRef[]; renders: RawRender[]; dynamicImports: RawImport[] } {
 	const moduleId = fileId(filePath);
-	const calls: RawCall[] = [];
-	const refSeen = new Map<string, RawRef>();
-	const renders: RawRender[] = [];
+	const enclosing = makeEnclosingFromId(symbols, moduleId);
+	const calls: SiteCall[] = [];
+	const rawRefs: Array<RawRef & { startIndex: number }> = [];
+	const renders: SiteRender[] = [];
+	const dynamicImports: RawImport[] = [];
 
-	walk(root, (node) => {
-		if (SKIP.has(node.type)) return false;
+	walkWithFields(root, (ctx) => {
+		const { nodeType, startIndex, line, text, frames } = ctx;
+		if (SKIP.has(nodeType)) return false;
 
-		if (node.type === "call_expression" && !isImportOrRequireCall(node)) {
-			const fromId = enclosingFromId(symbols, node.startIndex, moduleId);
-			const fn = node.childForFieldName("function");
-			calls.push({
-				fromId,
-				callee: parseCallee(fn),
-				args: parseArgs(node),
-				line: lines(node).start,
-				isNew: false,
-			});
-		}
-
-		if (node.type === "new_expression") {
-			const fromId = enclosingFromId(symbols, node.startIndex, moduleId);
-			const ctor = node.childForFieldName("constructor");
-			calls.push({
-				fromId,
-				callee: parseCallee(ctor),
-				args: parseArgs(node),
-				line: lines(node).start,
-				isNew: true,
-			});
-		}
-
-		if (node.type === "identifier" && knownNames.has(node.text)) {
-			if (!isCalleeIdentifier(node) && !isDeclarationBinding(node)) {
-				const fromId = enclosingFromId(symbols, node.startIndex, moduleId);
-				const role = refRole(node);
-				const key = `${fromId}|${node.text}|${role}`;
-				if (!refSeen.has(key)) {
-					refSeen.set(key, { fromId, name: node.text, role, line: lines(node).start });
-				}
+		if (nodeType === "identifier") {
+			if (!knownNames.has(text)) return true;
+			const leaf = frames.at(-1);
+			if (leaf && DECL_BINDING_FIELD.has(`${leaf.parentType}:${leaf.field}`)) return true;
+			if (
+				leaf &&
+				((leaf.parentType === "call_expression" && leaf.field === "function") ||
+					(leaf.parentType === "new_expression" && leaf.field === "constructor"))
+			) {
+				return true;
 			}
 		}
 
-		if (node.type === "jsx_opening_element" || node.type === "jsx_self_closing_element") {
-			const component = jsxComponentName(node.childForFieldName("name"));
-			if (component) {
-				const fromId = enclosingFromId(symbols, node.startIndex, moduleId);
-				renders.push({
-					fromId,
-					component,
-					props: jsxProps(node),
-					line: lines(node).start,
+		const site = startIndex;
+
+		if (nodeType === "call_expression") {
+			const call = ctx.materialize();
+			const dyn = recordCallSiteImport(call, knownNames);
+			if (dyn) {
+				dynamicImports.push(dyn);
+				return true;
+			}
+			const fn = call.childForFieldName("function");
+			calls.push({
+				fromId: enclosing(startIndex),
+				callee: parseCallee(fn),
+				args: parseArgs(call),
+				line,
+				isNew: false,
+				startIndex: site,
+			});
+			return true;
+		}
+
+		if (nodeType === "new_expression") {
+			const neu = ctx.materialize();
+			const ctor = neu.childForFieldName("constructor");
+			calls.push({
+				fromId: enclosing(startIndex),
+				callee: parseCallee(ctor),
+				args: parseArgs(neu),
+				line,
+				isNew: true,
+				startIndex: site,
+			});
+			return true;
+		}
+
+		if (nodeType === "identifier") {
+			if (!isCalleeByFrames(frames, nodeType) && !isDeclBindingByFrames(frames, nodeType)) {
+				rawRefs.push({
+					fromId: enclosing(startIndex),
+					name: text,
+					role: refRoleByFrames(frames),
+					line,
+					startIndex: site,
 				});
 			}
+			return true;
+		}
+
+		if (nodeType === "jsx_opening_element" || nodeType === "jsx_self_closing_element") {
+			const el = ctx.materialize();
+			const component = jsxComponentName(el.childForFieldName("name"));
+			if (component) {
+				renders.push({
+					fromId: enclosing(startIndex),
+					component,
+					props: jsxProps(el),
+					line,
+					startIndex: site,
+				});
+			}
+			return true;
 		}
 
 		return true;
 	});
 
-	return { calls, refs: [...refSeen.values()], renders };
+	return {
+		calls: sortCalls(calls),
+		refs: finalizeRefs(rawRefs),
+		renders: sortRenders(renders),
+		dynamicImports,
+	};
 }
 
 /** Test helper: mirror extractFile known-name set. */

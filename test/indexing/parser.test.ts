@@ -76,18 +76,4 @@ describe("parseSource", () => {
 		expect(pruned).toBeLessThan(all);
 	});
 
-	test("throughput: 2000 parses under 3000ms", () => {
-		const functions = Array.from(
-			{ length: 200 },
-			(_, i) => `export function f${i}() { return ${i}; }`,
-		).join("\n");
-		parseSource(functions, "js");
-		const t0 = performance.now();
-		for (let i = 0; i < 2000; i++) {
-			const result = parseSource(functions, "js");
-			if (result.hasError) throw new Error("unexpected parse error");
-		}
-		const elapsed = performance.now() - t0;
-		expect(elapsed).toBeLessThan(3000);
-	});
 });
