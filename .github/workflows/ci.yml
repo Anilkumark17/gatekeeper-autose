@@ -24,4 +24,7 @@ jobs:
       - run: pnpm run lint
       - run: pnpm run typecheck
       - run: pnpm test
+        env:
+          CI: "true"
+          TEST_DATABASE_URL: ${{ secrets.TEST_DATABASE_URL }}
       - run: pnpm run build

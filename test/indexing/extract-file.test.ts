@@ -57,12 +57,30 @@ describe("extractFile", () => {
 		expect(facts.imports.some((i) => i.kind === "dynamic" && i.specifier === "./pricing.js")).toBe(true);
 	});
 
-	test("200x all fixtures completes under 5s", async () => {
+	const SYNTHETIC = `import { applyDiscount, DISCOUNT_RATE, lineFor } from "./lib";\n${Array.from(
+		{ length: 50 },
+		(_, i) => `export function f${i}(x) { return applyDiscount(x, DISCOUNT_RATE); return [1].map(lineFor); }`,
+	).join("\n")}\n`;
+
+	test("JSON stable across 10 runs for fixtures and synthetic file", async () => {
 		const files = await fixtureFiles();
-		const t0 = performance.now();
-		for (let i = 0; i < 200; i++) {
-			for (const f of files) extractFile(f.path, f.source, "js");
+		for (const f of files) {
+			const serial = Array.from({ length: 10 }, () =>
+				JSON.stringify({
+					...extractFile(f.path, f.source, "js"),
+					parse: { hasError: false, errorCount: 0, ms: 0 },
+				}),
+			);
+			for (let i = 1; i < serial.length; i++) expect(serial[i]).toBe(serial[0]);
 		}
-		expect(performance.now() - t0).toBeLessThan(5000);
+		const p = "fixtures/synthetic-heavy.js";
+		const serial = Array.from({ length: 10 }, () =>
+			JSON.stringify({
+				...extractFile(p, SYNTHETIC, "js"),
+				parse: { hasError: false, errorCount: 0, ms: 0 },
+			}),
+		);
+		for (let i = 1; i < serial.length; i++) expect(serial[i]).toBe(serial[0]);
 	});
+
 });

@@ -1,13 +1,20 @@
+import Parser from "tree-sitter";
 import { sha256Hex } from "../../core/ids.js";
 import type { Lang } from "./lang.js";
+import type { RawExport } from "./exports.js";
 import { extractExports } from "./exports.js";
+import type { RawImport } from "./imports.js";
 import { extractImports } from "./imports.js";
-import { parseSource } from "./parser.js";
+import { GRAMMARS, walk } from "./parser.js";
 import { extractSymbols, type SymbolFact } from "./symbols.js";
 import { tokenize } from "./tokens.js";
-import { extractUsages, knownNamesForFile, type RawCall, type RawRef, type RawRender } from "./usages.js";
-import type { RawExport } from "./exports.js";
-import type { RawImport } from "./imports.js";
+import {
+	extractUsages,
+	knownNamesForFile,
+	type RawCall,
+	type RawRef,
+	type RawRender,
+} from "./usages.js";
 
 export interface FileFacts {
 	path: string;
@@ -38,10 +45,46 @@ function namesForTokens(symbols: SymbolFact[], imports: RawImport[], exports: Ra
 	return names;
 }
 
-export function extractFile(path: string, source: string, lang: Lang): FileFacts {
-	const parsed = parseSource(source, lang);
-	const root = parsed.tree.rootNode;
+function countErrors(root: Parser.SyntaxNode): number {
+	let errorCount = 0;
+	walk(root, (node) => {
+		if (node.isError || node.isMissing) errorCount++;
+		return node.hasError;
+	});
+	return errorCount;
+}
 
+const extractParsers = new Map<Lang, Parser>();
+
+function getExtractParser(lang: Lang): Parser {
+	let parser = extractParsers.get(lang);
+	if (!parser) {
+		parser = new Parser();
+		parser.setLanguage(GRAMMARS[lang] as Parser.Language);
+		extractParsers.set(lang, parser);
+	}
+	return parser;
+}
+
+/** Dedicated parser pool (not parseSource cache); reset before each parse. */
+function parseFresh(
+	source: string,
+	lang: Lang,
+): { tree: Parser.Tree; hasError: boolean; errorCount: number; ms: number } {
+	const t0 = performance.now();
+	const text = source.startsWith("\uFEFF") ? source.slice(1) : source;
+	const bufferSize = Math.max(32 * 1024, text.length * 2 + 1);
+	const parser = getExtractParser(lang);
+	parser.reset();
+	const tree = parser.parse(text, undefined, { bufferSize });
+	const hasError = tree.rootNode.hasError;
+	const errorCount = hasError ? countErrors(tree.rootNode) : 0;
+	return { tree, hasError, errorCount, ms: Math.round(performance.now() - t0) };
+}
+
+export function extractFile(path: string, source: string, lang: Lang): FileFacts {
+	const { tree, hasError, errorCount, ms } = parseFresh(source, lang);
+	const root = tree.rootNode;
 	const symbols = extractSymbols(root, path);
 	const imports = extractImports(root);
 	const exports = extractExports(root);
@@ -52,7 +95,7 @@ export function extractFile(path: string, source: string, lang: Lang): FileFacts
 		path,
 		lang,
 		contentHash: sha256Hex(source),
-		parse: { hasError: parsed.hasError, errorCount: parsed.errorCount, ms: parsed.ms },
+		parse: { hasError, errorCount, ms },
 		symbols,
 		imports,
 		exports,
