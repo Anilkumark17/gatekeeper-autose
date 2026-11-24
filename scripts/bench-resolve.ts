@@ -58,6 +58,10 @@ const topExternal = [...externalPkgCounts.entries()]
 	.slice(0, 20)
 	.map(([pkg, count]) => ({ pkg, count }));
 
+const installGenerated = [...stats.workspaceUnresolvedSpecifiers, ...stats.unresolvedSpecifiers].filter((row) =>
+	/@calcom\/prisma|\/generated\//i.test(row.specifier),
+);
+
 const notFoundUnique = (() => {
 	const seen = new Set<string>();
 	const out: typeof notFoundEntries = [];
@@ -79,6 +83,7 @@ console.log(
 		resolutionRatePct: resolutionRate(stats),
 		topUnresolved: stats.unresolvedSpecifiers,
 		topWorkspaceUnresolved: stats.workspaceUnresolvedSpecifiers,
+		install_generated: installGenerated,
 		topExternal,
 		workspaceAsExternal: stats.workspaceAsExternal,
 		workspacePackages: stats.workspacePackages,

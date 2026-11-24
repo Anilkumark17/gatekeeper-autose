@@ -1,7 +1,7 @@
 import path from "node:path";
 import { inspectHead } from "./inspect-head.js";
 import { detectLang, type Lang } from "./lang.js";
-import { listRepoFiles } from "./list-files.js";
+import { listRepoFiles, type WalkReason } from "./list-files.js";
 import { buildPackageMap, type PackageInfo } from "./package-map.js";
 import { type SkipReason, skipReasonByPath } from "./skip.js";
 
@@ -23,6 +23,9 @@ export interface SkippedFile {
 
 export interface DiscoveryResult {
 	root: string;
+	mode: "git" | "walk";
+	walkReason?: WalkReason;
+	/** Same as `mode` (legacy). */
 	source: "git" | "walk";
 	files: DiscoveredFile[];
 	skipped: SkippedFile[];
@@ -40,7 +43,7 @@ export async function discover(root: string, opts: DiscoverOptions = {}): Promis
 	const t0 = performance.now();
 	const absRoot = path.resolve(root);
 
-	const { paths, source } = await listRepoFiles(absRoot);
+	const { paths, mode, walkReason, source } = await listRepoFiles(absRoot);
 	const pkgMap = buildPackageMap(paths);
 
 	const skipped: SkippedFile[] = [];
@@ -108,6 +111,8 @@ export async function discover(root: string, opts: DiscoverOptions = {}): Promis
 
 	return {
 		root: absRoot,
+		mode,
+		walkReason,
 		source,
 		files,
 		skipped,

@@ -139,6 +139,13 @@ describe("extractUsages", () => {
 		expect(inner?.callee).toMatchObject({ kind: "this", name: "save" });
 	});
 
+	test("const v = new Cart() records newLocals for enclosing scope", () => {
+		const src = "export function setup() { const cart = new Cart(); cart.add(x); }\nexport class Cart { add() {} }";
+		const { newLocals } = usagesOf(src);
+		const from = symbolId(PATH, "setup");
+		expect(newLocals).toEqual([{ fromId: from, local: "cart", className: "Cart", line: 1 }]);
+	});
+
 	test("new Cart() isNew with name Cart", () => {
 		const src = "export class Cart {} new Cart()";
 		const { calls } = usagesOf(src);
@@ -172,6 +179,7 @@ describe("extractUsages", () => {
 			expect(runs[i]!.refs).toEqual(first.refs);
 			expect(runs[i]!.calls).toEqual(first.calls);
 			expect(runs[i]!.renders).toEqual(first.renders);
+			expect(runs[i]!.newLocals).toEqual(first.newLocals);
 		}
 		expect(first.refs.length).toBeGreaterThanOrEqual(1000);
 		const elapsed = performance.now() - t0;

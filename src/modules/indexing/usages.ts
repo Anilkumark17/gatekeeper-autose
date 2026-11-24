@@ -31,6 +31,7 @@ const FN_NODES = new Set([
 	"function",
 	"generator_function",
 ]);
+const FUNCTION_DECLS = new Set(["function_declaration", "generator_function_declaration"]);
 
 export type CalleeKind = "name" | "member" | "this" | "super" | "other";
 
@@ -65,6 +66,19 @@ export interface RawRender {
 	component: string;
 	props: string[];
 	line: number;
+}
+
+export interface RawNewLocal {
+	fromId: NodeId;
+	local: string;
+	className: string;
+	line: number;
+}
+
+export interface RawScopeParams {
+	fromId: NodeId;
+	names: string[];
+	types: Record<string, string>;
 }
 
 const PASCAL = /^[A-Z]/;
@@ -497,13 +511,51 @@ export function extractUsages(
 	symbols: SymbolFact[],
 	knownNames: Set<string>,
 	filePath: string,
-): { calls: RawCall[]; refs: RawRef[]; renders: RawRender[]; dynamicImports: RawImport[] } {
+): {
+	calls: RawCall[];
+	refs: RawRef[];
+	renders: RawRender[];
+	dynamicImports: RawImport[];
+	newLocals: RawNewLocal[];
+	scopeParams: RawScopeParams[];
+} {
 	const moduleId = fileId(filePath);
 	const enclosing = makeEnclosingFromId(symbols, moduleId);
 	const calls: SiteCall[] = [];
 	const rawRefs: Array<RawRef & { startIndex: number }> = [];
 	const renders: SiteRender[] = [];
 	const dynamicImports: RawImport[] = [];
+	const newLocals: RawNewLocal[] = [];
+	const scopeParams = new Map<NodeId, { names: Set<string>; types: Record<string, string> }>();
+
+	function typeName(node: Node | null | undefined): string | null {
+		if (!node) return null;
+		if (node.type === "type_annotation") {
+			return typeName(
+				node.childForFieldName("type") ??
+					node.namedChildren.find((c) => c.type === "type_identifier" || c.type === "nested_type_identifier"),
+			);
+		}
+		if (node.type === "type_identifier" || node.type === "nested_type_identifier") return node.text;
+		return null;
+	}
+
+	function recordParams(fromId: NodeId, params: Node) {
+		const entry = scopeParams.get(fromId) ?? { names: new Set<string>(), types: {} };
+		for (const child of params.namedChildren) {
+			if (child.type !== "required_parameter" && child.type !== "optional_parameter") continue;
+			const pattern =
+				child.childForFieldName("pattern") ?? child.namedChildren.find((c) => c.type === "identifier");
+			if (pattern?.type !== "identifier" && pattern?.type !== "property_identifier") continue;
+			entry.names.add(pattern.text);
+			const tn =
+				typeName(child.childForFieldName("type")) ??
+				typeName(child.namedChildren.find((c) => c.type === "type_annotation") ?? null);
+			if (tn) entry.types[pattern.text] = tn;
+		}
+		if (entry.names.size === 0) return;
+		scopeParams.set(fromId, entry);
+	}
 
 	walkWithFields(root, (ctx) => {
 		const { nodeType, startIndex, line, text, frames } = ctx;
@@ -557,6 +609,39 @@ export function extractUsages(
 			return true;
 		}
 
+		if (nodeType === "formal_parameters") {
+			const parent = ctx.materialize().parent;
+			if (
+				parent &&
+				(FUNCTION_DECLS.has(parent.type) ||
+					parent.type === "method_definition" ||
+					parent.type === "arrow_function" ||
+					parent.type === "function_expression")
+			) {
+				recordParams(enclosing(startIndex), ctx.materialize());
+			}
+			return true;
+		}
+
+		if (nodeType === "variable_declarator") {
+			const declarator = ctx.materialize();
+			const nameNode = declarator.childForFieldName("name");
+			const value = declarator.childForFieldName("value");
+			if (nameNode?.type === "identifier" && value?.type === "new_expression") {
+				const ctor = value.childForFieldName("constructor");
+				const callee = parseCallee(ctor);
+				if (callee.name) {
+					newLocals.push({
+						fromId: enclosing(startIndex),
+						local: nameNode.text,
+						className: callee.name,
+						line,
+					});
+				}
+			}
+			return true;
+		}
+
 		if (nodeType === "identifier") {
 			if (!isCalleeByFrames(frames, nodeType) && !isDeclBindingByFrames(frames, nodeType)) {
 				rawRefs.push({
@@ -588,11 +673,29 @@ export function extractUsages(
 		return true;
 	});
 
+	newLocals.sort(
+		(a, b) =>
+			cmpString(a.fromId, b.fromId) ||
+			a.line - b.line ||
+			cmpString(a.local, b.local) ||
+			cmpString(a.className, b.className),
+	);
+
+	const scopeParamsOut: RawScopeParams[] = [...scopeParams.entries()]
+		.map(([fromId, row]) => ({
+			fromId,
+			names: [...row.names].sort(cmpString),
+			types: row.types,
+		}))
+		.sort((a, b) => cmpString(a.fromId, b.fromId));
+
 	return {
 		calls: sortCalls(calls),
 		refs: finalizeRefs(rawRefs),
 		renders: sortRenders(renders),
 		dynamicImports,
+		newLocals,
+		scopeParams: scopeParamsOut,
 	};
 }
 

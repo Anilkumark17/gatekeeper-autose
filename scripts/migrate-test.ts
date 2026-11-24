@@ -1,5 +1,7 @@
 import "dotenv/config";
-import { execSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const testUrl = process.env.TEST_DATABASE_URL;
 if (!testUrl) {
@@ -7,7 +9,12 @@ if (!testUrl) {
 	process.exit(1);
 }
 
-execSync("drizzle-kit migrate", {
+const runMigrations = path.join(path.dirname(fileURLToPath(import.meta.url)), "run-migrations.ts");
+const child = spawnSync(process.execPath, ["--import", "tsx", runMigrations], {
 	stdio: "inherit",
-	env: { ...process.env, DATABASE_URL_DIRECT: testUrl },
+	env: { ...process.env, MIGRATE_DATABASE_URL: testUrl },
 });
+
+if (child.status !== 0) {
+	process.exit(child.status ?? 1);
+}

@@ -18,6 +18,8 @@ export interface SymbolFact {
   isDefault: boolean;
   bodyHash: string;
   exportHash: string;
+  /** Type names for injected / declared fields (class symbols only). */
+  fieldTypes?: Record<string, string>;
 }
 
 type Node = Parser.SyntaxNode;
@@ -52,6 +54,62 @@ function classifyFunction(name: string, fn: Node): SymbolKind {
   return "function";
 }
 
+function typeNameFrom(node: Node | null | undefined): string | null {
+  if (!node) return null;
+  if (node.type === "type_annotation") {
+    return typeNameFrom(
+      node.childForFieldName("type") ??
+        node.namedChildren.find((c) => c.type === "type_identifier" || c.type === "nested_type_identifier"),
+    );
+  }
+  if (node.type === "type_identifier" || node.type === "identifier") return node.text;
+  if (node.type === "nested_type_identifier") return node.text;
+  if (node.type === "generic_type") return typeNameFrom(node.childForFieldName("type") ?? node.namedChildren[0]);
+  if (node.type === "predefined_type") return node.text;
+  return null;
+}
+
+function hasParameterProperty(param: Node): boolean {
+	return param.children.some((c) => c.type === "accessibility_modifier");
+}
+
+function collectClassFieldTypes(cls: Node): Record<string, string> {
+  const fieldTypes: Record<string, string> = {};
+  const body = cls.childForFieldName("body");
+  if (!body) return fieldTypes;
+
+  const memberLabel = (member: Node): string | null =>
+    member.childForFieldName("name")?.text ??
+    member.childForFieldName("property")?.text ??
+    member.namedChildren.find((c) => c.type === "property_identifier")?.text ??
+    null;
+
+  for (const member of body.namedChildren) {
+    if (member.type === "method_definition" && memberLabel(member) === "constructor") {
+      const params = member.childForFieldName("parameters");
+      if (!params) continue;
+      for (const param of params.namedChildren) {
+        if (param.type !== "required_parameter" && param.type !== "optional_parameter") continue;
+        const isPropertyParam = param.children.some((c) => c.type === "accessibility_modifier");
+        if (!isPropertyParam) continue;
+        const nameNode =
+          param.childForFieldName("pattern") ?? param.namedChildren.find((c) => c.type === "identifier");
+        const fieldName = nameNode?.text ?? null;
+        const typeNode =
+          param.childForFieldName("type") ?? param.namedChildren.find((c) => c.type === "type_annotation");
+        const tn = typeNameFrom(typeNode);
+        if (fieldName && tn) fieldTypes[fieldName] = tn;
+      }
+      continue;
+    }
+    if (!FIELD_NODES.has(member.type)) continue;
+    const fieldName = memberLabel(member);
+    const tn = typeNameFrom(member.childForFieldName("type"));
+    if (fieldName && tn) fieldTypes[fieldName] = tn;
+  }
+  return fieldTypes;
+}
+
 export function extractSymbols(root: Node, path: string): SymbolFact[] {
   const out: SymbolFact[] = [];
   const seen = new Map<string, number>();
@@ -83,6 +141,7 @@ export function extractSymbols(root: Node, path: string): SymbolFact[] {
     const className = cls.childForFieldName("name")?.text ?? "default";
     const body = cls.childForFieldName("body");
     const methods = body ? body.namedChildren : [];
+    const fieldTypes = collectClassFieldTypes(cls);
     add(
       "class",
       className,
@@ -93,6 +152,8 @@ export function extractSymbols(root: Node, path: string): SymbolFact[] {
         .map((m) => m.childForFieldName("name")?.text ?? m.childForFieldName("property")?.text ?? "")
         .join(","),
     );
+    const classSym = out[out.length - 1]!;
+    if (Object.keys(fieldTypes).length > 0) classSym.fieldTypes = fieldTypes;
     for (const member of methods) {
       const memberName = member.childForFieldName("name")?.text ?? member.childForFieldName("property")?.text;
       if (!memberName) continue;

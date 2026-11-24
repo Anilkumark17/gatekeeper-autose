@@ -95,6 +95,16 @@ export const formatLabel = (s: string) => s.trim();`;
     ]);
   });
 
+  test("TS class records constructor parameter properties and field types", () => {
+    const src = `export class Svc {
+  constructor(private readonly repo: RepoType) {}
+  repo2: RepoType;
+  run() { return this.repo.find(); }
+}`;
+    const cls = symbolsOf(src, "ts", "src/svc.ts").find((s) => s.name === "Svc")!;
+    expect(cls.fieldTypes).toEqual({ repo: "RepoType", repo2: "RepoType" });
+  });
+
   test("class field arrow functions are methods in JS and TS", () => {
     const src = "export class A { run = () => 1; private stop = (x: number) => x; }";
     expect(symbolsOf(src, "ts", "src/a.ts").map((s) => s.qualifiedName)).toEqual(["A", "A.run", "A.stop"]);

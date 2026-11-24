@@ -22,6 +22,7 @@ if (!url) {
 function result(paths: string[], skipped: { path: string; reason: "minified" }[] = []): DiscoveryResult {
 	return {
 		root: "/tmp/x",
+		mode: "walk",
 		source: "walk",
 		files: paths.map((p) => ({
 			path: p,

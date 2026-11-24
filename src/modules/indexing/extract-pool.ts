@@ -25,6 +25,7 @@ export let extractPoolSubmittedInFlight = 0;
 
 export interface ExtractPool {
 	run(tasks: readonly ExtractTask[], onProgress?: (done: number, total: number) => void): AsyncGenerator<ExtractResult>;
+	close(): Promise<void>;
 	destroy(): Promise<void>;
 	threads: number;
 }
@@ -59,6 +60,10 @@ function workerPathAndExecArgv(workerFile?: string): { filename: string; execArg
 	};
 }
 
+function waitImmediate(): Promise<void> {
+	return new Promise((resolve) => setImmediate(resolve));
+}
+
 export function createExtractPool(opts: CreateExtractPoolOptions = {}): ExtractPool {
 	const threads = opts.threads ?? defaultThreads();
 	const timeoutMs = opts.timeoutMs ?? 10_000;
@@ -73,77 +78,120 @@ export function createExtractPool(opts: CreateExtractPoolOptions = {}): ExtractP
 		idleTimeout: 60_000,
 	});
 
-	let destroyed = false;
+	let closed = false;
+	let closing = false;
+	let openRuns = 0;
+	const inFlight = new Set<Promise<ExtractResult>>();
 
-	const wrapTask = async (task: ExtractTask): Promise<ExtractResult> => {
-		const t0 = performance.now();
-		const ac = new AbortController();
-		const timer = setTimeout(() => ac.abort("extract_timeout"), timeoutMs);
-		try {
-			const facts = (await pool.run(task, { signal: ac.signal })) as FileFacts;
-			return { ok: true, path: task.path, facts, ms: performance.now() - t0 };
-		} catch (err) {
-			const message = err instanceof Error ? err.message : String(err);
-			const timedOut =
-				ac.signal.aborted ||
-				(err instanceof Error && (err.name === "AbortError" || message.includes("aborted")));
-			return {
-				ok: false,
-				path: task.path,
-				reason: timedOut ? "extract_timeout" : "extract_error",
-				message,
-				ms: performance.now() - t0,
-			};
-		} finally {
-			clearTimeout(timer);
+	const assertAcceptingRuns = (): void => {
+		if (closed || closing) throw new Error("extract pool destroyed");
+	};
+
+	const drainInFlight = async (): Promise<void> => {
+		while (inFlight.size > 0) {
+			await Promise.allSettled([...inFlight]);
+			await waitImmediate();
 		}
+	};
+
+	const wrapTask = (task: ExtractTask): Promise<ExtractResult> => {
+		const work = (async (): Promise<ExtractResult> => {
+			const t0 = performance.now();
+			const ac = new AbortController();
+			const timer = setTimeout(() => ac.abort("extract_timeout"), timeoutMs);
+			try {
+				const facts = (await pool.run(task, { signal: ac.signal })) as FileFacts;
+				return { ok: true, path: task.path, facts, ms: performance.now() - t0 };
+			} catch (err) {
+				const message = err instanceof Error ? err.message : String(err);
+				const timedOut =
+					ac.signal.aborted ||
+					(err instanceof Error && (err.name === "AbortError" || message.includes("aborted")));
+				return {
+					ok: false,
+					path: task.path,
+					reason: timedOut ? "extract_timeout" : "extract_error",
+					message,
+					ms: performance.now() - t0,
+				};
+			} finally {
+				clearTimeout(timer);
+			}
+		})();
+		inFlight.add(work);
+		void work.finally(() => {
+			inFlight.delete(work);
+		});
+		return work;
+	};
+
+	const close = async (): Promise<void> => {
+		if (closed) return;
+		closing = true;
+		while (openRuns > 0) {
+			await drainInFlight();
+			await waitImmediate();
+		}
+		await drainInFlight();
+		await pool.destroy();
+		closed = true;
 	};
 
 	return {
 		threads,
 		async *run(tasks, onProgress) {
-			if (destroyed) throw new Error("extract pool destroyed");
-			const total = tasks.length;
-			if (total === 0) {
-				onProgress?.(0, 0);
-				return;
-			}
-
-			let nextIdx = 0;
-			let done = 0;
-			const pending = new Map<number, Promise<ExtractResult>>();
-			let nextId = 0;
-
-			const submit = (): void => {
-				while (pending.size < maxInFlight && nextIdx < total) {
-					const task = tasks[nextIdx++]!;
-					const id = nextId++;
-					extractPoolSubmittedInFlight++;
-					const promise = wrapTask(task).finally(() => {
-						extractPoolSubmittedInFlight--;
-					});
-					pending.set(id, promise);
+			assertAcceptingRuns();
+			openRuns++;
+			try {
+				const total = tasks.length;
+				if (total === 0) {
+					onProgress?.(0, 0);
+					return;
 				}
-			};
 
-			submit();
+				let nextIdx = 0;
+				let done = 0;
+				const pending = new Map<number, Promise<ExtractResult>>();
+				let nextId = 0;
 
-			while (done < total) {
-				if (pending.size === 0) break;
-				const raced = await Promise.race(
-					[...pending.entries()].map(async ([id, promise]) => ({ id, result: await promise })),
-				);
-				pending.delete(raced.id);
-				done++;
-				yield raced.result;
+				const submit = (): void => {
+					if (closing || closed) return;
+					while (pending.size < maxInFlight && nextIdx < total) {
+						const task = tasks[nextIdx++]!;
+						const id = nextId++;
+						extractPoolSubmittedInFlight++;
+						const promise = wrapTask(task).finally(() => {
+							extractPoolSubmittedInFlight--;
+						});
+						pending.set(id, promise);
+					}
+				};
+
 				submit();
-				if (onProgress && (done % 100 === 0 || done === total)) onProgress(done, total);
+
+				while (done < total) {
+					if (pending.size === 0) break;
+					const raced = await Promise.race(
+						[...pending.entries()].map(async ([id, promise]) => ({ id, result: await promise })),
+					);
+					pending.delete(raced.id);
+					done++;
+					yield raced.result;
+					submit();
+					if (onProgress && (done % 100 === 0 || done === total)) onProgress(done, total);
+				}
+
+				while (pending.size > 0) {
+					const raced = await Promise.race(
+						[...pending.entries()].map(async ([id, promise]) => ({ id, result: await promise })),
+					);
+					pending.delete(raced.id);
+				}
+			} finally {
+				openRuns--;
 			}
 		},
-		async destroy() {
-			if (destroyed) return;
-			destroyed = true;
-			await pool.destroy();
-		},
+		close,
+		destroy: close,
 	};
 }

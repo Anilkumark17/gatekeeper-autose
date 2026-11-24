@@ -13,7 +13,9 @@ import {
 	knownNamesForFile,
 	type RawCall,
 	type RawRef,
+	type RawNewLocal,
 	type RawRender,
+	type RawScopeParams,
 } from "./usages.js";
 
 export interface FileFacts {
@@ -27,6 +29,8 @@ export interface FileFacts {
 	calls: RawCall[];
 	refs: RawRef[];
 	renders: RawRender[];
+	newLocals: RawNewLocal[];
+	scopeParams: RawScopeParams[];
 	tokens: string[];
 }
 
@@ -88,7 +92,12 @@ export function extractFile(path: string, source: string, lang: Lang): FileFacts
 	const symbols = extractSymbols(root, path);
 	const exports = extractExports(root);
 	const known = knownNamesForFile(extractImports(root), symbols);
-	const { calls, refs, renders, dynamicImports } = extractUsages(root, symbols, known, path);
+	const { calls, refs, renders, dynamicImports, newLocals, scopeParams } = extractUsages(
+		root,
+		symbols,
+		known,
+		path,
+	);
 	const imports = extractImports(root, dynamicImports);
 
 	return {
@@ -102,6 +111,8 @@ export function extractFile(path: string, source: string, lang: Lang): FileFacts
 		calls,
 		refs,
 		renders,
+		newLocals,
+		scopeParams,
 		tokens: tokenize(namesForTokens(symbols, imports, exports)),
 	};
 }

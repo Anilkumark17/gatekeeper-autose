@@ -104,6 +104,20 @@ export const contracts = pgTable(
 	(table) => [primaryKey({ columns: [table.repoId, table.id] })],
 );
 
+export const fileRecency = pgTable(
+	"file_recency",
+	{
+		repoId: text("repo_id")
+			.notNull()
+			.references(() => repos.id, { onDelete: "cascade" }),
+		path: text("path").notNull(),
+		lastSha: text("last_sha").notNull(),
+		lastAt: timestamp("last_at", { withTimezone: true, mode: "date" }).notNull(),
+		atBoundary: boolean("at_boundary").notNull().default(false),
+	},
+	(table) => [primaryKey({ columns: [table.repoId, table.path] })],
+);
+
 export const searchDocs = pgTable(
 	"search_docs",
 	{
