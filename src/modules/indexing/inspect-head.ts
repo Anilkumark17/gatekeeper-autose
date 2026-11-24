@@ -4,6 +4,7 @@ import type { SkipReason } from "./skip.js";
 export interface HeadInfo {
   size: number;
   reason: SkipReason | null;
+  generated?: boolean;
 }
 
 export interface InspectOptions {
@@ -25,7 +26,7 @@ export async function inspectHead(absPath: string, opts: InspectOptions = {}): P
 
   const head = await readHead(absPath, Math.min(headBytes, size));
 
-  if (GENERATED.test(head.slice(0, 512))) return { size, reason: "generated" };
+  if (GENERATED.test(head.slice(0, 512))) return { size, reason: null, generated: true };
   if (looksMinified(head)) return { size, reason: "minified" };
   return { size, reason: null };
 }

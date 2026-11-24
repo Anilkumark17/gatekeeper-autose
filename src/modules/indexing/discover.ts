@@ -12,6 +12,7 @@ export interface DiscoveredFile {
 	size: number;
 	pkg: string;
 	tsconfig: string | null;
+	generated: boolean;
 }
 
 export interface SkippedFile {
@@ -96,6 +97,7 @@ export async function discover(root: string, opts: DiscoverOptions = {}): Promis
 			size: item.head.size,
 			pkg: ctx.pkg,
 			tsconfig: ctx.tsconfig,
+			generated: item.head.generated === true,
 		});
 	}
 

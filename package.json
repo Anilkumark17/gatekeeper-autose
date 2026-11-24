@@ -12,6 +12,8 @@
 		"lint": "biome check .",
 		"lint:fix": "biome check --write .",
 		"test": "vitest run",
+		"test:db": "vitest run --no-file-parallelism test/indexing/files.repo.test.ts",
+		"test:all": "pnpm test && pnpm test:db",
 		"test:perf": "vitest run test/perf --no-file-parallelism",
 		"test:watch": "vitest",
 		"db:generate": "drizzle-kit generate",
@@ -21,7 +23,8 @@
 		"db:studio": "drizzle-kit studio",
 		"setup": "node --input-type=module -e \"import { copyFileSync, existsSync } from 'node:fs'; if (!existsSync('.env')) copyFileSync('.env.example', '.env');\"",
 		"doctor": "tsx scripts/doctor.ts",
-		"bench:parse": "tsx scripts/bench-parse.ts"
+		"bench:parse": "tsx scripts/bench-parse.ts",
+		"bench:resolve": "tsx scripts/bench-resolve.ts"
 	},
 	"keywords": [],
 	"author": "",
@@ -42,9 +45,11 @@
 		"pg": "^8.23.1",
 		"pino": "^10.4.0",
 		"pino-http": "^11.0.0",
+		"piscina": "^5.3.2",
 		"tree-sitter": "^0.25.1",
 		"tree-sitter-javascript": "^0.25.0",
 		"tree-sitter-typescript": "^0.23.2",
+		"typescript": "^5.9.3",
 		"zod": "^4.6.7"
 	},
 	"devDependencies": {
@@ -55,7 +60,6 @@
 		"drizzle-kit": "^0.31.11",
 		"pino-pretty": "^13.2.0",
 		"tsx": "^4.23.15",
-		"typescript": "^5.9.3",
 		"vitest": "^5.1.1"
 	}
 }

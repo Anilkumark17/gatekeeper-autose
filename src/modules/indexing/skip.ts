@@ -6,7 +6,6 @@ export type SkipReason =
   | "minified"
   | "not_source"
   | "too_large"
-  | "generated"
   | "unreadable";
 
 const IGNORED_DIRS = new Set([

@@ -11,6 +11,15 @@ async function write(root: string, rel: string, body = "export {};\n") {
   await writeFile(abs, body);
 }
 
+function haveGit(): boolean {
+  try {
+    execFileSync("git", ["--version"], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function git(root: string, ...args: string[]) {
   execFileSync("git", args, { cwd: root, stdio: "ignore" });
 }
@@ -32,23 +41,32 @@ describe("listRepoFiles", () => {
     await rm(root, { recursive: true, force: true });
   });
 
-  test("git repo: respects .gitignore and includes untracked files", async () => {
-    await write(root, ".gitignore", "node_modules\ndist\n");
-    git(root, "init", "-q");
-    git(root, "add", "src/main.js", ".gitignore");
-    // src/utils/string.js and "src/with space/file.ts" stay untracked on purpose
+  const gitCase = process.env.CI === "true" ? test : test.skipIf(!haveGit());
+  gitCase(
+    process.env.CI === "true"
+      ? "git repo: respects .gitignore and includes untracked files"
+      : "git repo: respects .gitignore and includes untracked files (skipped: git not on PATH)",
+    async () => {
+      if (!haveGit()) {
+        throw new Error("git must be on PATH when CI=true");
+      }
+      await write(root, ".gitignore", "node_modules\ndist\n");
+      git(root, "init", "-q");
+      git(root, "add", "src/main.js", ".gitignore");
+      // src/utils/string.js and "src/with space/file.ts" stay untracked on purpose
 
-    const { paths, source } = await listRepoFiles(root);
+      const { paths, source } = await listRepoFiles(root);
 
-    expect(source).toBe("git");
-    expect(paths).toEqual([
-      ".gitignore",
-      "README.md",
-      "src/main.js",
-      "src/utils/string.js",
-      "src/with space/file.ts",
-    ]);
-  });
+      expect(source).toBe("git");
+      expect(paths).toEqual([
+        ".gitignore",
+        "README.md",
+        "src/main.js",
+        "src/utils/string.js",
+        "src/with space/file.ts",
+      ]);
+    },
+  );
 
   test("plain folder: walk prunes ignored folders", async () => {
     const { paths, source } = await listRepoFiles(root);

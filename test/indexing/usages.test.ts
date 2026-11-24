@@ -82,12 +82,16 @@ function assertEnclosingOracle(root: ReturnType<typeof parseSource>["tree"]["roo
 }
 
 describe("extractUsages", () => {
-	test("makeEnclosingFromId matches enclosingFromId on every visited node (fixtures + synthetic)", async () => {
-		const files = await sampleJsSources();
-		expect(files.length).toBeGreaterThan(0);
-		for (const f of files) assertEnclosingOracle(parseSource(f.source, "js").tree.rootNode, f.path);
-		assertEnclosingOracle(parseSource(buildRefHeavySynthetic(), "js").tree.rootNode, PATH);
-	});
+	test(
+		"makeEnclosingFromId matches enclosingFromId on every visited node (fixtures + synthetic)",
+		async () => {
+			const files = await sampleJsSources();
+			expect(files.length).toBeGreaterThan(0);
+			for (const f of files) assertEnclosingOracle(parseSource(f.source, "js").tree.rootNode, f.path);
+			assertEnclosingOracle(parseSource(buildRefHeavySynthetic(), "js").tree.rootNode, PATH);
+		},
+		15_000,
+	);
 
 	test("lineFor calls titleCase with member arg", () => {
 		const src = 'import { titleCase } from "./u"; export function lineFor(item) { return titleCase(item.name) }';

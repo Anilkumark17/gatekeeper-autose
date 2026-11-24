@@ -44,9 +44,9 @@ describe("inspectHead", () => {
     expect((await inspectHead(file("normal.js"), { maxBytes: 10 })).reason).toBe("too_large");
   });
 
-  test("generated headers are detected", async () => {
-    expect((await inspectHead(file("gen.ts"))).reason).toBe("generated");
-    expect((await inspectHead(file("dne.ts"))).reason).toBe("generated");
+  test("generated headers are flagged but not skipped", async () => {
+    expect((await inspectHead(file("gen.ts")))).toMatchObject({ reason: null, generated: true });
+    expect((await inspectHead(file("dne.ts")))).toMatchObject({ reason: null, generated: true });
   });
 
   test("single long line is minified", async () => {

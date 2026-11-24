@@ -35,7 +35,13 @@ afterAll(async () => {
 describe("discover", () => {
   test("keeps only real source files, sorted", async () => {
     const r = await discover(root);
-    expect(r.files.map((f) => f.path)).toEqual(["packages/ui/src/Button.tsx", "src/App.tsx", "src/main.ts"]);
+    expect(r.files.map((f) => f.path)).toEqual([
+      "packages/ui/src/Button.tsx",
+      "src/App.tsx",
+      "src/gen.ts",
+      "src/main.ts",
+    ]);
+    expect(r.files.find((f) => f.path === "src/gen.ts")?.generated).toBe(true);
   });
 
   test("records skip reasons", async () => {
@@ -43,7 +49,6 @@ describe("discover", () => {
     expect(Object.fromEntries(r.skipped.map((s) => [s.path, s.reason]))).toEqual({
       "public/vendor.min.js": "minified",
       "src/data.js": "too_large",
-      "src/gen.ts": "generated",
       "src/types.d.ts": "declaration",
     });
   });
@@ -60,7 +65,7 @@ describe("discover", () => {
   test("counts add up and paths are POSIX", async () => {
     const r = await discover(root);
     expect(r.counts.indexed + r.counts.skipped + r.counts.notSource).toBe(r.counts.listed);
-    expect(r.counts.notSource).toBe(4); // 2 package.json, tsconfig.json, README.md
+    expect(r.counts.notSource).toBe(4);
     expect([...r.files, ...r.skipped].every((f) => !f.path.includes("\\"))).toBe(true);
   });
 

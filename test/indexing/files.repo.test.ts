@@ -23,7 +23,15 @@ function result(paths: string[], skipped: { path: string; reason: "minified" }[]
 	return {
 		root: "/tmp/x",
 		source: "walk",
-		files: paths.map((p) => ({ path: p, abs: `/tmp/x/${p}`, lang: "js", size: 10, pkg: "", tsconfig: null })),
+		files: paths.map((p) => ({
+			path: p,
+			abs: `/tmp/x/${p}`,
+			lang: "js",
+			size: 10,
+			pkg: "",
+			tsconfig: null,
+			generated: false,
+		})),
 		skipped,
 		packages: [],
 		counts: { listed: paths.length + skipped.length, indexed: paths.length, skipped: skipped.length, notSource: 3 },
