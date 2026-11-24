@@ -1,8 +1,14 @@
 import { describe, expect, test } from "vitest";
 import { extractImports } from "../../src/modules/indexing/imports.js";
 import { parseSource } from "../../src/modules/indexing/parser.js";
+import { extractUsages } from "../../src/modules/indexing/usages.js";
 
-const importsOf = (src: string, lang: "js" | "ts" = "js") => extractImports(parseSource(src, lang).tree.rootNode);
+const importsOf = (src: string, lang: "js" | "ts" = "js") => {
+	const root = parseSource(src, lang).tree.rootNode;
+	const known = new Set<string>();
+	const { dynamicImports } = extractUsages(root, [], known, "test.js");
+	return extractImports(root, dynamicImports);
+};
 
 const JS = `import a from "./a";
 import * as ns from "./ns";

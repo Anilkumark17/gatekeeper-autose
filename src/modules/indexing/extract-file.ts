@@ -86,10 +86,10 @@ export function extractFile(path: string, source: string, lang: Lang): FileFacts
 	const { tree, hasError, errorCount, ms } = parseFresh(source, lang);
 	const root = tree.rootNode;
 	const symbols = extractSymbols(root, path);
-	const imports = extractImports(root);
 	const exports = extractExports(root);
-	const known = knownNamesForFile(imports, symbols);
-	const { calls, refs, renders } = extractUsages(root, symbols, known, path);
+	const known = knownNamesForFile(extractImports(root), symbols);
+	const { calls, refs, renders, dynamicImports } = extractUsages(root, symbols, known, path);
+	const imports = extractImports(root, dynamicImports);
 
 	return {
 		path,

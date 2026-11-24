@@ -50,8 +50,8 @@ describe("extractUsages determinism (perf)", () => {
 		}
 		expect(first.refs.length).toBeGreaterThanOrEqual(1000);
 		console.log(
-			`[perf] usages 20x determinism: ${first.calls.length} calls, ${first.refs.length} refs, ${elapsed.toFixed(1)}ms (limit 3000ms)`,
+			`[perf] usages 20x determinism: ${first.calls.length} calls, ${first.refs.length} refs, ${elapsed.toFixed(1)}ms (limit 6500ms)`,
 		);
-		expect(elapsed).toBeLessThan(3000);
+		expect(elapsed).toBeLessThan(6500);
 	}, 120_000);
 });

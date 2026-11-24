@@ -1,7 +1,9 @@
 import type Parser from "tree-sitter";
 import type { NodeId } from "../../core/ids.js";
 import { fileId } from "../../core/ids.js";
-import { lines, walk } from "./parser.js";
+import { walk } from "./parser.js";
+import type { RawImport } from "./imports.js";
+import { recordCallSiteImport } from "./imports.js";
 import type { SymbolFact } from "./symbols.js";
 
 type Node = Parser.SyntaxNode;
@@ -327,19 +329,10 @@ const DECL_BINDING_FIELD = new Set([
 	"jsx_attribute:name",
 ]);
 
-function fieldChildNode(node: Node, field: string): Node | null {
-	const c = node.walk();
-	if (!c.gotoFirstChild()) return null;
-	do {
-		if (c.currentFieldName === field) return c.currentNode;
-	} while (c.gotoNextSibling());
-	return null;
-}
-
-function isImportOrRequireFn(fn: Node | null): boolean {
-	if (!fn) return false;
-	if (fn.type === "import") return true;
-	return fn.type === "identifier" && fn.text === "require";
+/** Test hook: full-tree walks from extractUsages. */
+export let usageFullWalkCount = 0;
+export function resetUsageFullWalkCount(): void {
+	usageFullWalkCount = 0;
 }
 
 function isCalleeByFrames(frames: readonly AncestorFrame[], nodeType: string): boolean {
@@ -393,30 +386,47 @@ function refRoleByFrames(frames: readonly AncestorFrame[]): "argument" | "value"
 	return g?.parentType === "call_expression" ? "argument" : "value";
 }
 
-function walkWithFields(
-	root: Node,
-	visit: (
-		node: Node,
-		nodeType: string,
-		startIndex: number,
-		endIndex: number,
-		line: number,
-		text: string,
-		frames: readonly AncestorFrame[],
-	) => boolean,
-): void {
+type WalkCtx = {
+	readonly nodeType: string;
+	readonly startIndex: number;
+	readonly endIndex: number;
+	readonly line: number;
+	readonly text: string;
+	readonly frames: readonly AncestorFrame[];
+	materialize: () => Node;
+};
+
+function walkWithFields(root: Node, visit: (ctx: WalkCtx) => boolean): void {
+	usageFullWalkCount++;
 	const cursor = root.walk();
 	const frames: AncestorFrame[] = [];
+
 	while (true) {
-		const node = cursor.currentNode;
-		const nodeType = cursor.nodeType;
-		const startIndex = cursor.startIndex;
-		const endIndex = cursor.endIndex;
-		const line = cursor.startPosition.row + 1;
-		const text = cursor.nodeText;
-		const descend = visit(node, nodeType, startIndex, endIndex, line, text, frames);
+		const isNamed = cursor.nodeIsNamed;
+		let descend = true;
+
+		let parentType = "";
+		if (isNamed) {
+			parentType = cursor.nodeType;
+			const startIndex = cursor.startIndex;
+			const endIndex = cursor.endIndex;
+			const line = cursor.startPosition.row + 1;
+			const text =
+				parentType === "identifier" || parentType === "property_identifier" ? cursor.nodeText : "";
+
+			descend = visit({
+				nodeType: parentType,
+				startIndex,
+				endIndex,
+				line,
+				text,
+				frames,
+				materialize: () => cursor.currentNode as Node,
+			});
+		}
+
 		if (descend && cursor.gotoFirstChild()) {
-			frames.push({ parentType: nodeType, field: cursor.currentFieldName ?? "" });
+			if (parentType) frames.push({ parentType, field: cursor.currentFieldName ?? "" });
 			continue;
 		}
 		if (cursor.gotoNextSibling()) {
@@ -424,10 +434,10 @@ function walkWithFields(
 			if (top) top.field = cursor.currentFieldName ?? "";
 			continue;
 		}
-		while (!cursor.gotoNextSibling()) {
+		do {
 			if (frames.length > 0) frames.pop();
 			if (!cursor.gotoParent()) return;
-		}
+		} while (!cursor.gotoNextSibling());
 		const top = frames.at(-1);
 		if (top) top.field = cursor.currentFieldName ?? "";
 	}
@@ -487,15 +497,18 @@ export function extractUsages(
 	symbols: SymbolFact[],
 	knownNames: Set<string>,
 	filePath: string,
-): { calls: RawCall[]; refs: RawRef[]; renders: RawRender[] } {
+): { calls: RawCall[]; refs: RawRef[]; renders: RawRender[]; dynamicImports: RawImport[] } {
 	const moduleId = fileId(filePath);
 	const enclosing = makeEnclosingFromId(symbols, moduleId);
 	const calls: SiteCall[] = [];
 	const rawRefs: Array<RawRef & { startIndex: number }> = [];
 	const renders: SiteRender[] = [];
+	const dynamicImports: RawImport[] = [];
 
-	walkWithFields(root, (node, nodeType, startIndex, _endIndex, line, text, frames) => {
+	walkWithFields(root, (ctx) => {
+		const { nodeType, startIndex, line, text, frames } = ctx;
 		if (SKIP.has(nodeType)) return false;
+
 		if (nodeType === "identifier") {
 			if (!knownNames.has(text)) return true;
 			const leaf = frames.at(-1);
@@ -512,26 +525,31 @@ export function extractUsages(
 		const site = startIndex;
 
 		if (nodeType === "call_expression") {
-			const fn = fieldChildNode(node, "function");
-			if (!isImportOrRequireFn(fn)) {
-				calls.push({
-					fromId: enclosing(startIndex),
-					callee: parseCallee(fn),
-					args: parseArgs(node),
-					line,
-					isNew: false,
-					startIndex: site,
-				});
+			const call = ctx.materialize();
+			const dyn = recordCallSiteImport(call, knownNames);
+			if (dyn) {
+				dynamicImports.push(dyn);
+				return true;
 			}
+			const fn = call.childForFieldName("function");
+			calls.push({
+				fromId: enclosing(startIndex),
+				callee: parseCallee(fn),
+				args: parseArgs(call),
+				line,
+				isNew: false,
+				startIndex: site,
+			});
 			return true;
 		}
 
 		if (nodeType === "new_expression") {
-			const ctor = fieldChildNode(node, "constructor");
+			const neu = ctx.materialize();
+			const ctor = neu.childForFieldName("constructor");
 			calls.push({
 				fromId: enclosing(startIndex),
 				callee: parseCallee(ctor),
-				args: parseArgs(node),
+				args: parseArgs(neu),
 				line,
 				isNew: true,
 				startIndex: site,
@@ -540,11 +558,7 @@ export function extractUsages(
 		}
 
 		if (nodeType === "identifier") {
-			if (
-				!isCalleeByFrames(frames, nodeType) &&
-				!isDeclBindingByFrames(frames, nodeType) &&
-				!(node.parent?.type === "jsx_attribute" && sameNode(node.parent.namedChildren[0] ?? node, node))
-			) {
+			if (!isCalleeByFrames(frames, nodeType) && !isDeclBindingByFrames(frames, nodeType)) {
 				rawRefs.push({
 					fromId: enclosing(startIndex),
 					name: text,
@@ -557,12 +571,13 @@ export function extractUsages(
 		}
 
 		if (nodeType === "jsx_opening_element" || nodeType === "jsx_self_closing_element") {
-			const component = jsxComponentName(fieldChildNode(node, "name"));
+			const el = ctx.materialize();
+			const component = jsxComponentName(el.childForFieldName("name"));
 			if (component) {
 				renders.push({
 					fromId: enclosing(startIndex),
 					component,
-					props: jsxProps(node),
+					props: jsxProps(el),
 					line,
 					startIndex: site,
 				});
@@ -573,7 +588,12 @@ export function extractUsages(
 		return true;
 	});
 
-	return { calls: sortCalls(calls), refs: finalizeRefs(rawRefs), renders: sortRenders(renders) };
+	return {
+		calls: sortCalls(calls),
+		refs: finalizeRefs(rawRefs),
+		renders: sortRenders(renders),
+		dynamicImports,
+	};
 }
 
 /** Test helper: mirror extractFile known-name set. */
